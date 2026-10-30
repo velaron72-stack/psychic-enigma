@@ -191,6 +191,18 @@ local function defaultConfig()
             Pitch = "Off",
             PitchAngle = 75,
         },
+        Knife = {
+            Enabled = false,
+            Knife = "Butterfly",
+            Skin = "Steel",
+            AutoInspect = true,
+            InspectEvery = 8,
+            HideTools = true,
+            Scale = 1,
+            HoldAngle = 0,
+            AssetRoll = 0,
+            AssetFlip = false,
+        },
         Optimize = {
             Explosions = true,
             DebrisCleaner = false,
@@ -3946,6 +3958,455 @@ connect(Workspace.DescendantAdded, function(instance)
     end
 end)
 
+-- ===================== Local knife (client-side item) =====================
+-- Nothing here is replicated: the knife exists only on your screen. It is welded to your right hand, so it
+-- follows you while you run, jump and bunny hop. Knives are built from simple parts and animated in code
+-- (draw, idle / run sway, inspect flips). One real Roblox model (Creator Store "Butterfly Knife" by @elitz164,
+-- asset 5679481639) can be loaded through the executor and gets the same animations.
+local Knife = {}
+Knife.names = { "Butterfly", "Karambit", "Bayonet", "Flip Knife", "Classic Knife", "Butterfly (Roblox model)" }
+Knife.skins = {
+    { name = "Steel", color = Color3.fromRGB(196, 200, 210), material = Enum.Material.Metal },
+    { name = "Gold", color = Color3.fromRGB(235, 190, 70), material = Enum.Material.Metal },
+    { name = "Doppler", color = Color3.fromRGB(60, 120, 255), material = Enum.Material.Metal },
+    { name = "Crimson", color = Color3.fromRGB(190, 30, 45), material = Enum.Material.Metal },
+    { name = "Fade", color = Color3.fromRGB(255, 120, 190), material = Enum.Material.Metal },
+    { name = "Black", color = Color3.fromRGB(28, 28, 32), material = Enum.Material.Metal },
+}
+Knife.skinNames = {}
+for _, skin in ipairs(Knife.skins) do Knife.skinNames[#Knife.skinNames + 1] = skin.name end
+Knife.assetId = 5679481639
+Knife.assetName = "Butterfly (Roblox model)"
+Knife.assetStatus = "не загружена"
+Knife.assetData = nil
+Knife.assetLoading = false
+Knife.loadedVersion = 0
+Knife.builders = {}
+Knife.hidden = setmetatable({}, { __mode = "k" })
+Knife.time = 0
+Knife.drawStart = 0
+Knife.nextInspect = 0
+Knife.inspectStart = nil
+Knife.toolsAt = 0
+
+function Knife.ease(x)
+    x = clamp(x, 0, 1)
+    return x * x * (3 - 2 * x)
+end
+
+function Knife.currentSkin()
+    for _, skin in ipairs(Knife.skins) do
+        if skin.name == Config.Knife.Skin then return skin end
+    end
+    return Knife.skins[1]
+end
+
+-- creates a part welded to `parent`; positions and sizes are multiplied by the Size setting
+function Knife.part(parent, size, cframe, color, material, transparency)
+    local scale = Config.Knife.Scale
+    local part = Instance.new("Part")
+    part.Size = size * scale
+    part.Color = color
+    part.Material = material or Enum.Material.SmoothPlastic
+    part.Transparency = transparency or 0
+    part.Anchored = false
+    part.CanCollide = false
+    part.CanQuery = false
+    part.CanTouch = false
+    part.Massless = true
+    part.TopSurface = Enum.SurfaceType.Smooth
+    part.BottomSurface = Enum.SurfaceType.Smooth
+    part.Parent = Knife.model
+    local weld = Instance.new("Weld")
+    weld.Part0 = parent
+    weld.Part1 = part
+    weld.C0 = CFrame.new(cframe.Position * scale) * (cframe - cframe.Position)
+    weld.Parent = part
+    return part, weld
+end
+
+-- invisible pivot that carries a moving piece of the knife
+function Knife.group(parent, cframe)
+    local part, weld = Knife.part(parent, Vector3.new(0.05, 0.05, 0.05), cframe, Color3.new(0, 0, 0), nil, 1)
+    return part, weld, weld.C0
+end
+
+function Knife.blade(parent, length, width, skin)
+    local color = skin.color
+    local dark = color:Lerp(Color3.new(0, 0, 0), 0.45)
+    local groove = color:Lerp(Color3.new(0, 0, 0), 0.22)
+    Knife.part(parent, Vector3.new(0.05, width, length), CFrame.new(0, 0, -length * 0.5), color, skin.material)
+    Knife.part(parent, Vector3.new(0.05, width * 0.72, width * 0.72), CFrame.new(0, 0, -length) * CFrame.Angles(math.pi / 4, 0, 0), color, skin.material)
+    Knife.part(parent, Vector3.new(0.07, 0.05, length), CFrame.new(0, width * 0.5, -length * 0.5), dark, skin.material)
+    Knife.part(parent, Vector3.new(0.056, 0.045, length * 0.65), CFrame.new(0, 0.02, -length * 0.45), groove, skin.material)
+end
+
+Knife.dark = Color3.fromRGB(38, 38, 42)
+Knife.metal = Color3.fromRGB(150, 150, 158)
+
+function Knife.flipInspect(duration, flips)
+    return function(e)
+        local p = clamp(e / duration, 0, 1)
+        local s = math.sin(p * math.pi)
+        return CFrame.new(0.1 * s, 0.3 * s, -0.3 * s) * CFrame.Angles(Knife.ease(p) * math.pi * 2 * flips, 0, 0.25 * s)
+    end
+end
+
+function Knife.turnInspect(duration)
+    return function(e)
+        local p = clamp(e / duration, 0, 1)
+        local s = math.sin(p * math.pi)
+        return CFrame.new(0.15 * s, 0.35 * s, -0.35 * s) * CFrame.Angles(-0.7 * s, Knife.ease(p) * math.pi * 2, 0.5 * s)
+    end
+end
+
+Knife.builders["Classic Knife"] = function(root, skin)
+    Knife.blade(root, 1.15, 0.3, skin)
+    Knife.part(root, Vector3.new(0.2, 0.24, 0.9), CFrame.new(0, 0, 0.47), Knife.dark)
+    Knife.part(root, Vector3.new(0.14, 0.44, 0.1), CFrame.new(0, 0, 0.02), Knife.metal, Enum.Material.Metal)
+    Knife.part(root, Vector3.new(0.22, 0.26, 0.1), CFrame.new(0, 0, 0.95), Knife.metal, Enum.Material.Metal)
+    return { gripZ = 0.47, duration = 1.8, inspect = Knife.turnInspect(1.8) }
+end
+
+Knife.builders["Bayonet"] = function(root, skin)
+    Knife.blade(root, 1.4, 0.34, skin)
+    Knife.part(root, Vector3.new(0.2, 0.25, 0.9), CFrame.new(0, 0, 0.47), Color3.fromRGB(70, 52, 40))
+    Knife.part(root, Vector3.new(0.15, 0.5, 0.12), CFrame.new(0, 0, 0.02), Knife.metal, Enum.Material.Metal)
+    Knife.part(root, Vector3.new(0.22, 0.28, 0.12), CFrame.new(0, 0, 0.95), Knife.metal, Enum.Material.Metal)
+    Knife.part(root, Vector3.new(0.12, 0.12, 0.12), CFrame.new(0, -0.26, 0.2), Knife.metal, Enum.Material.Metal)
+    return { gripZ = 0.47, duration = 2.0, inspect = Knife.turnInspect(2.0) }
+end
+
+-- hooked blade that curves downwards, finger ring behind the handle; spins around the ring
+Knife.builders["Karambit"] = function(root, skin)
+    local radius = 0.27
+    for index = 0, 9 do
+        local angle = index / 10 * math.pi * 2
+        Knife.part(root, Vector3.new(0.09, 0.07, 0.17),
+            CFrame.new(0, radius * math.sin(angle), radius * math.cos(angle)) * CFrame.Angles(-(angle + math.pi / 2), 0, 0),
+            Knife.dark)
+    end
+    Knife.part(root, Vector3.new(0.2, 0.22, 0.7), CFrame.new(0, 0, -0.62), Knife.dark)
+    local arc = 1.1
+    for index = 0, 6 do
+        local angle = index * 0.26
+        local height = 0.24 - index * 0.026
+        Knife.part(root, Vector3.new(0.05, height, 0.24),
+            CFrame.new(0, -arc * (1 - math.cos(angle)), -1.0 - arc * math.sin(angle)) * CFrame.Angles(-angle, 0, 0),
+            skin.color, skin.material)
+    end
+    return {
+        gripZ = 0,
+        duration = 2.2,
+        inspect = function(e)
+            local p = clamp(e / 2.2, 0, 1)
+            local s = math.sin(p * math.pi)
+            return CFrame.new(0, 0.3 * s, -0.2 * s) * CFrame.Angles(Knife.ease(p) * math.pi * 4, 0, 0.2 * s)
+        end,
+    }
+end
+
+-- balisong: two handle halves swing around the pivot
+Knife.builders["Butterfly"] = function(root, skin)
+    Knife.blade(root, 1.1, 0.3, skin)
+    local halves = {}
+    for index, side in ipairs({ -1, 1 }) do
+        local group, weld, base = Knife.group(root, CFrame.new(0, 0, 0))
+        Knife.part(group, Vector3.new(0.1, 0.22, 0.95), CFrame.new(side * 0.13, 0, 0.5), Knife.dark)
+        Knife.part(group, Vector3.new(0.12, 0.1, 0.2), CFrame.new(side * 0.13, 0, 0.98), Knife.metal, Enum.Material.Metal)
+        halves[index] = { weld = weld, base = base }
+    end
+    local function setAngle(angle)
+        for _, half in ipairs(halves) do
+            half.weld.C0 = half.base * CFrame.Angles(angle, 0, 0)
+        end
+    end
+    return {
+        gripZ = 0.5,
+        duration = 2.6,
+        inspect = function(e)
+            local p = clamp(e / 2.6, 0, 1)
+            local s = math.sin(p * math.pi)
+            return CFrame.new(0.1 * s, 0.3 * s, -0.25 * s) * CFrame.Angles(-0.4 * s, Knife.ease(p) * math.pi * 2, 0)
+        end,
+        animate = function(e)
+            if not e then setAngle(0) return end
+            local p = clamp(e / 2.6, 0, 1)
+            setAngle(Knife.ease((p - 0.1) / 0.8) * math.pi * 4)
+        end,
+    }
+end
+
+-- folding knife: the blade folds into the handle, the knife flips, then it opens again
+Knife.builders["Flip Knife"] = function(root, skin)
+    local group, weld, base = Knife.group(root, CFrame.new(0, 0, 0))
+    Knife.blade(group, 1.15, 0.3, skin)
+    Knife.part(root, Vector3.new(0.22, 0.26, 0.95), CFrame.new(0, 0, 0.5), Knife.dark)
+    Knife.part(root, Vector3.new(0.12, 0.3, 0.12), CFrame.new(0, 0, 0.02), Knife.metal, Enum.Material.Metal)
+    local function setHinge(angle)
+        weld.C0 = base * CFrame.Angles(angle, 0, 0)
+    end
+    return {
+        gripZ = 0.5,
+        duration = 2.4,
+        inspect = function(e)
+            local p = clamp(e / 2.4, 0, 1)
+            local s = math.sin(p * math.pi)
+            local spin = 0
+            if p > 0.25 and p < 0.7 then spin = Knife.ease((p - 0.25) / 0.45) * math.pi * 2 end
+            if p >= 0.7 then spin = math.pi * 2 end
+            return CFrame.new(0.1 * s, 0.3 * s, -0.25 * s) * CFrame.Angles(spin, 0, 0)
+        end,
+        animate = function(e)
+            if not e then setHinge(0) return end
+            local p = clamp(e / 2.4, 0, 1)
+            if p < 0.25 then
+                setHinge(Knife.ease(p / 0.25) * math.pi)
+            elseif p < 0.7 then
+                setHinge(math.pi)
+            else
+                setHinge(math.pi * (1 - Knife.ease((p - 0.7) / 0.25)))
+            end
+        end,
+    }
+end
+
+-- ---- the real Roblox model ----
+function Knife.loadAsset()
+    if Knife.assetData or Knife.assetLoading then return end
+    Knife.assetLoading = true
+    Knife.assetStatus = "загрузка..."
+    task.spawn(function()
+        local object = nil
+        local ok, objects = pcall(function() return game:GetObjects("rbxassetid://" .. Knife.assetId) end)
+        if ok and type(objects) == "table" then object = objects[1] end
+        if not object then
+            local okInsert, loaded = pcall(function() return game:GetService("InsertService"):LoadAsset(Knife.assetId) end)
+            if okInsert and loaded then object = loaded end
+        end
+        Knife.assetLoading = false
+        if not object then
+            Knife.assetStatus = "не удалось загрузить, используется встроенная бабочка"
+            return
+        end
+        local parts = {}
+        if object:IsA("BasePart") then parts[#parts + 1] = object end
+        for _, descendant in ipairs(object:GetDescendants()) do
+            if descendant:IsA("BasePart") then parts[#parts + 1] = descendant end
+        end
+        if #parts == 0 then
+            Knife.assetStatus = "в ассете нет деталей, используется встроенная бабочка"
+            return
+        end
+        local holder = Instance.new("Model")
+        for _, part in ipairs(parts) do part.Parent = holder end
+        local boxCFrame, boxSize = holder:GetBoundingBox()
+        -- the longest side of the model becomes the blade axis
+        local longest = math.max(boxSize.X, boxSize.Y, boxSize.Z)
+        local axisX, axisZ
+        if boxSize.X == longest then
+            axisX, axisZ = boxCFrame.YVector, boxCFrame.XVector
+        elseif boxSize.Y == longest then
+            axisX, axisZ = boxCFrame.ZVector, boxCFrame.YVector
+        else
+            axisX, axisZ = boxCFrame.XVector, boxCFrame.ZVector
+        end
+        local rootCFrame = CFrame.fromMatrix(boxCFrame.Position, axisX, axisZ:Cross(axisX), axisZ)
+        local entries = {}
+        for _, part in ipairs(parts) do
+            entries[#entries + 1] = { part = part, offset = rootCFrame:ToObjectSpace(part.CFrame) }
+        end
+        Knife.assetData = { entries = entries, length = longest, holder = holder }
+        Knife.assetStatus = "загружена"
+        Knife.loadedVersion = Knife.loadedVersion + 1
+    end)
+end
+
+Knife.builders[Knife.assetName] = function(root, skin)
+    local data = Knife.assetData
+    if not data then return nil end
+    local factor = (1.7 / math.max(data.length, 0.01)) * Config.Knife.Scale
+    for _, entry in ipairs(data.entries) do
+        local clone = entry.part:Clone()
+        for _, descendant in ipairs(clone:GetDescendants()) do
+            if descendant:IsA("LuaSourceContainer") or descendant:IsA("JointInstance") or descendant:IsA("WeldConstraint") then
+                descendant:Destroy()
+            end
+        end
+        clone.Anchored = false
+        clone.CanCollide = false
+        clone.CanQuery = false
+        clone.CanTouch = false
+        clone.Massless = true
+        clone.Size = clone.Size * factor
+        clone.Parent = Knife.model
+        local weld = Instance.new("Weld")
+        weld.Part0 = root
+        weld.Part1 = clone
+        weld.C0 = CFrame.new(entry.offset.Position * factor) * (entry.offset - entry.offset.Position)
+        weld.Parent = clone
+    end
+    return { gripZ = 0, duration = 2.2, inspect = Knife.flipInspect(2.2, 2) }
+end
+
+-- ---- building / destroying ----
+function Knife.restoreTools()
+    for part in pairs(Knife.hidden) do
+        pcall(function() part.LocalTransparencyModifier = 0 end)
+        Knife.hidden[part] = nil
+    end
+end
+
+function Knife.destroy()
+    if Knife.model then
+        pcall(function() Knife.model:Destroy() end)
+    end
+    Knife.model, Knife.root, Knife.grip, Knife.info = nil, nil, nil, nil
+    Knife.restoreTools()
+end
+
+function Knife.build(character, hand)
+    Knife.destroy()
+    local cfg = Config.Knife
+    local model = Instance.new("Model")
+    model.Name = "4080_Knife"
+    Knife.model = model
+    local root = Instance.new("Part")
+    root.Name = "KnifeRoot"
+    root.Size = Vector3.new(0.05, 0.05, 0.05)
+    root.Transparency = 1
+    root.Anchored = false
+    root.CanCollide = false
+    root.CanQuery = false
+    root.CanTouch = false
+    root.Massless = true
+    root.Parent = model
+    Knife.root = root
+
+    local skin = Knife.currentSkin()
+    local info = nil
+    if cfg.Knife == Knife.assetName then
+        info = Knife.builders[Knife.assetName](root, skin)
+    end
+    if not info then
+        local builder = Knife.builders[cfg.Knife]
+        if not builder or cfg.Knife == Knife.assetName then builder = Knife.builders["Butterfly"] end
+        info = builder(root, skin)
+    end
+    Knife.info = info
+    model.Parent = Workspace.CurrentCamera or Workspace
+
+    local grip = Instance.new("Weld")
+    grip.Part0 = hand
+    grip.Part1 = root
+    grip.C1 = CFrame.new(0, 0, (info.gripZ or 0) * cfg.Scale)
+    grip.Parent = root
+    Knife.grip = grip
+    Knife.hand, Knife.character = hand, character
+    Knife.builtKnife, Knife.builtSkin, Knife.builtScale = cfg.Knife, cfg.Skin, cfg.Scale
+    Knife.builtVersion = Knife.loadedVersion
+    Knife.drawStart = Knife.time
+    Knife.inspectStart = nil
+    Knife.nextInspect = Knife.time + 0.75 -- an inspect right after the draw animation
+end
+
+function Knife.startInspect()
+    if Knife.info and not Knife.inspectStart then
+        Knife.inspectStart = Knife.time
+    end
+end
+
+function Knife.hideTools(character, hide)
+    for _, tool in ipairs(character:GetChildren()) do
+        if tool:IsA("Tool") then
+            for _, descendant in ipairs(tool:GetDescendants()) do
+                if descendant:IsA("BasePart") then
+                    if hide then
+                        descendant.LocalTransparencyModifier = 1
+                        Knife.hidden[descendant] = true
+                    elseif Knife.hidden[descendant] then
+                        descendant.LocalTransparencyModifier = 0
+                        Knife.hidden[descendant] = nil
+                    end
+                end
+            end
+        end
+    end
+end
+
+function Knife.update(dt)
+    local cfg = Config.Knife
+    if not cfg.Enabled then
+        if Knife.model then Knife.destroy() end
+        return
+    end
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not character or not humanoid or humanoid.Health <= 0 then
+        if Knife.model then Knife.destroy() end
+        return
+    end
+    local hand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm") or getRoot(character)
+    if not hand then return end
+    if not Knife.model or not Knife.model.Parent or Knife.character ~= character or Knife.hand ~= hand
+        or Knife.builtKnife ~= cfg.Knife or Knife.builtSkin ~= cfg.Skin or Knife.builtScale ~= cfg.Scale
+        or (cfg.Knife == Knife.assetName and Knife.builtVersion ~= Knife.loadedVersion) then
+        Knife.build(character, hand)
+    end
+    Knife.time = Knife.time + dt
+    local t = Knife.time
+
+    -- the weapon you are holding is hidden (for you only) while the knife is out
+    if t - Knife.toolsAt > 0.4 then
+        Knife.toolsAt = t
+        Knife.hideTools(character, cfg.HideTools)
+    end
+
+    -- idle sway, plus a stronger bob while running
+    local root = getRoot(character)
+    local velocity = root and root.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
+    local moving = clamp(Vector3.new(velocity.X, 0, velocity.Z).Magnitude / 16, 0, 2)
+    local sway = CFrame.new(math.sin(t * 1.3) * 0.015, math.sin(t * 1.9) * 0.02, 0)
+        * CFrame.Angles(math.sin(t * 1.7) * 0.035, 0, math.sin(t * 1.1) * 0.04)
+    if moving > 0.05 then
+        local phase = t * (6 + moving * 3)
+        sway = sway * CFrame.new(math.sin(phase * 0.5) * 0.05 * moving, math.abs(math.sin(phase)) * 0.06 * moving, 0)
+            * CFrame.Angles(math.sin(phase) * 0.12 * moving, 0, math.cos(phase * 0.5) * 0.1 * moving)
+    end
+
+    -- draw animation
+    local draw = CFrame.new()
+    local drawElapsed = t - Knife.drawStart
+    if drawElapsed < 0.6 then
+        local inverse = 1 - drawElapsed / 0.6
+        draw = CFrame.new(0, -1.2 * inverse * inverse, 0.5 * inverse) * CFrame.Angles(-1.1 * inverse, 0, 0.7 * inverse)
+    end
+
+    -- inspect animation (automatic every few seconds, or from the button)
+    local info = Knife.info
+    local inspect = CFrame.new()
+    if Knife.inspectStart then
+        local elapsed = t - Knife.inspectStart
+        if elapsed >= info.duration then
+            Knife.inspectStart = nil
+            Knife.nextInspect = t + cfg.InspectEvery
+            if info.animate then info.animate(nil) end
+        else
+            inspect = info.inspect(elapsed)
+            if info.animate then info.animate(elapsed) end
+        end
+    elseif cfg.AutoInspect and t >= Knife.nextInspect and drawElapsed >= 0.6 then
+        Knife.startInspect()
+    end
+
+    -- the hand: R15 RightHand or R6 Right Arm (the knife points forward from the fist)
+    local fist = CFrame.new(0, hand.Name == "RightHand" and -0.05 or -1, 0) * CFrame.Angles(math.rad(cfg.HoldAngle), 0, 0)
+    if cfg.Knife == Knife.assetName and Knife.assetData then
+        fist = fist * CFrame.Angles(0, cfg.AssetFlip and math.pi or 0, cfg.AssetRoll * math.pi / 2)
+    end
+    Knife.grip.C0 = fist * draw * sway * inspect
+end
+
 local function indexOf(list, value)
     for index, entry in ipairs(list) do
         if entry == value then return index end
@@ -4253,6 +4714,7 @@ local function buildGUI()
     local triggerPage = createPage("Trigger")
     local soundsPage = createPage("Sounds")
     local optimizePage = createPage("Optimize")
+    local knifePage = createPage("Knife")
     local settingsPage = createPage("Settings")
 
     makeSection(aimPage, "Targeting")
@@ -4670,6 +5132,64 @@ makeLabel(antiAimPage, "Type None = no rotation (use only the offset). Offset mo
         soundVolumeSet(Config.Sounds.Volume, true)
     end
 
+    -- ===== Local knife =====
+    makeSection(knifePage, "Local knife")
+    local knifeEnabledSet = makeToggle(knifePage, "Local Knife (only you can see it)", Config.Knife.Enabled, function(value)
+        Config.Knife.Enabled = value
+        if value and Config.Knife.Knife == Knife.assetName then Knife.loadAsset() end
+    end)
+    local knifeTypeSet = makeCycle(knifePage, "Knife", Knife.names, indexOf(Knife.names, Config.Knife.Knife), function(name)
+        Config.Knife.Knife = name
+        if name == Knife.assetName then Knife.loadAsset() end
+    end)
+    local knifeSkinSet = makeCycle(knifePage, "Skin", Knife.skinNames, indexOf(Knife.skinNames, Config.Knife.Skin), function(name)
+        Config.Knife.Skin = name
+    end)
+
+    makeSection(knifePage, "Animation")
+    local knifeAutoSet = makeToggle(knifePage, "Auto Inspect", Config.Knife.AutoInspect, function(value)
+        Config.Knife.AutoInspect = value
+    end)
+    local knifeEverySet = makeSlider(knifePage, "Inspect every (seconds)", 3, 30, Config.Knife.InspectEvery, 1, function(value)
+        Config.Knife.InspectEvery = value
+    end)
+    makeButton(knifePage, "Inspect Now", function()
+        Knife.startInspect()
+    end, Theme.accent)
+
+    makeSection(knifePage, "Look")
+    local knifeHideSet = makeToggle(knifePage, "Hide the weapon in my hand", Config.Knife.HideTools, function(value)
+        Config.Knife.HideTools = value
+        Knife.toolsAt = 0
+    end)
+    local knifeScaleSet = makeSlider(knifePage, "Size", 0.6, 2, Config.Knife.Scale, 0.1, function(value)
+        Config.Knife.Scale = value
+    end)
+    local knifeAngleSet = makeSlider(knifePage, "Hold Angle", -90, 90, Config.Knife.HoldAngle, 5, function(value)
+        Config.Knife.HoldAngle = value
+    end)
+
+    makeSection(knifePage, "Roblox model")
+    makeButton(knifePage, "Rotate Model 90°", function()
+        Config.Knife.AssetRoll = (Config.Knife.AssetRoll + 1) % 4
+    end, Theme.panel)
+    makeButton(knifePage, "Flip Model (tip the other way)", function()
+        Config.Knife.AssetFlip = not Config.Knife.AssetFlip
+    end, Theme.panel)
+    local knifeStatusLabel = makeLabel(knifePage, "", 22, Theme.accent, false, 12)
+    makeLabel(knifePage, "The knife exists only on your screen: other players do not see it and it does nothing in the game. It is attached to your right hand, so you can run, jump and bunny hop with it. It draws itself with an animation, sways while you run and plays an inspect flip every few seconds. 'Butterfly (Roblox model)' loads a real knife model from the Roblox Creator Store through your executor (game:GetObjects); if it points the wrong way use Rotate / Flip. If it cannot be loaded, the built-in butterfly is used.", 120, Theme.muted, false, 11)
+
+    State.refreshers[#State.refreshers + 1] = function()
+        knifeEnabledSet(Config.Knife.Enabled, true)
+        knifeTypeSet(indexOf(Knife.names, Config.Knife.Knife), true)
+        knifeSkinSet(indexOf(Knife.skinNames, Config.Knife.Skin), true)
+        knifeAutoSet(Config.Knife.AutoInspect, true)
+        knifeEverySet(Config.Knife.InspectEvery, true)
+        knifeHideSet(Config.Knife.HideTools, true)
+        knifeScaleSet(Config.Knife.Scale, true)
+        knifeAngleSet(Config.Knife.HoldAngle, true)
+    end
+
     -- ===== Optimization =====
     makeSection(optimizePage, "Explosions")
     local optExplosionsSet = makeToggle(optimizePage, "Remove Explosion Effects", Config.Optimize.Explosions, function(value)
@@ -4861,6 +5381,7 @@ makeLabel(antiAimPage, "Type None = no rotation (use only the offset). Offset mo
         esp = { label = "ESP", get = function() return Config.ESP.Enabled end, set = espEnabledSet },
         aa = { label = "Anti-Aim", get = function() return Config.AntiAim.Enabled end, set = aaEnabledSet },
         bhop = { label = "Bunny Hop", get = function() return Config.Movement.Bhop end, set = bhopSet },
+        knife = { label = "Knife", get = function() return Config.Knife.Enabled end, set = knifeEnabledSet },
     }
     local function toggleFeature(key)
         local feature = features[key]
@@ -4875,8 +5396,8 @@ makeLabel(antiAimPage, "Type None = no rotation (use only the offset). Offset mo
     end
 
     -- ===== tabs =====
-    local tabOrder = { "Aimbot", "Silent Aim", "Trigger", "ESP", "Movement", "Anti-Aim", "Sounds", "Optimize", "Settings" }
-    local tabLabels = { Settings = "Настройки", Optimize = "Оптимизация" }
+    local tabOrder = { "Aimbot", "Silent Aim", "Trigger", "ESP", "Movement", "Anti-Aim", "Sounds", "Knife", "Optimize", "Settings" }
+    local tabLabels = { Settings = "Настройки", Optimize = "Оптимизация", Knife = "Ножи" }
     State.openTabs = {}
 
     local function createTabPill(id)
@@ -4956,6 +5477,7 @@ makeLabel(antiAimPage, "Type None = no rotation (use only the offset). Offset mo
     makeKey("ESP", function() toggleFeature("esp"); refreshKeys() end, features.esp.get)
     makeKey("Anti-Aim", function() toggleFeature("aa"); refreshKeys() end, features.aa.get)
     makeKey("Bhop", function() toggleFeature("bhop"); refreshKeys() end, features.bhop.get)
+    makeKey("Knife", function() toggleFeature("knife"); refreshKeys() end, features.knife.get)
     makeKey("Deathmatch", function()
         setDeathmatch(not Config.Settings.Deathmatch)
         refreshKeys()
@@ -4981,6 +5503,7 @@ makeLabel(antiAimPage, "Type None = no rotation (use only the offset). Offset mo
 
     State.homeStatus = function()
         refreshKeys()
+        knifeStatusLabel.Text = "Модель Roblox: " .. tostring(Knife.assetStatus)
         optimizeStatusLabel.Text = string.format("Взрывов обработано: %d   |   Изменено: %d", Opt.explosions, Opt.touched)
         triggerStatusLabel.Text = string.format("Луч: %s   |   Цель: %s   |   Метод: %s   |   Выстрелов: %d",
             State.triggerRayInfo or "—", State.triggerTargetName or "нет", State.triggerMethodName or resolveFireMethod(), State.triggerShots)
@@ -5134,6 +5657,8 @@ unload = function()
     if State.unloaded then return end
     State.unloaded = true
     pcall(Opt.shutdown)
+    Config.Knife.Enabled = false
+    pcall(Knife.destroy)
     Config.Trigger.Enabled = false
     pcall(releaseTrigger)
     Config.AntiAim.Enabled = false
@@ -5238,6 +5763,7 @@ local function onRender(dt)
     end
     pcall(updateFOV)
     pcall(updateBodyJoints, dt)
+    pcall(Knife.update, dt)
     -- aimbot, silent aim and trigger bot now run every frame (they used to run at 30 Hz)
     pcall(updateAimbot, dt)
     pcall(updateSilentTarget)
